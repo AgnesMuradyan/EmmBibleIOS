@@ -138,10 +138,12 @@ private struct BibleWebView: UIViewRepresentable {
             case "save":
                 guard let quote = SavedQuote(payload: payload) else { return }
                 var quotes = SavedQuoteStore.load()
-                if !quotes.contains(where: { $0.id == quote.id }) {
+                if let existingIndex = quotes.firstIndex(where: { $0.id == quote.id }) {
+                    quotes[existingIndex] = quote
+                } else {
                     quotes.insert(quote, at: 0)
-                    SavedQuoteStore.save(quotes)
                 }
+                SavedQuoteStore.save(quotes)
                 sendSavedQuotes(quotes, to: webView)
             case "delete":
                 guard let id = payload["id"] as? String else { return }
