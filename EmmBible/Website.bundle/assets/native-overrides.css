@@ -1,0 +1,4 @@
+/* The native reader intentionally does not expose verse sharing. */
+button[title="Կիսվել համարով"] {
+  display: none !important;
+}
