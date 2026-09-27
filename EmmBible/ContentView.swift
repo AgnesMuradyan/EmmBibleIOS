@@ -75,6 +75,8 @@ private struct BibleWebView: UIViewRepresentable {
                   stylesLoaded: [...document.styleSheets].some(sheet => sheet.href?.includes('/assets/')),
                   saveControls: document.querySelectorAll('.native-save-verse').length,
                   savedQuotesButton: !!document.querySelector('.native-saved-quotes'),
+                  savedQuotesInHeader: !!document.querySelector('.header-actions .native-saved-quotes'),
+                  savedQuotesInToolbar: !!document.querySelector('.toolbar-actions .native-saved-quotes'),
                   error: document.querySelector('.error-card')?.textContent || null
                 })
                 """) { result, error in
@@ -250,27 +252,34 @@ private enum SavedQuotesScript {
       const addControls = () => {
         document.querySelectorAll('.verse-row').forEach(row => {
           const actions = row.querySelector('.verse-actions');
-          if (!actions || actions.querySelector('.native-save-verse')) return;
-          const chapter = document.querySelector('.chapter-header p')?.textContent.match(/[0-9]+/)?.[0] || '';
+          if (!actions) return;
           const book = document.querySelector('.chapter-header h1')?.textContent.trim() || '';
           const verse = row.dataset.verse || '';
           const text = row.querySelector('.verse-body')?.textContent.trim() || '';
-          const id = `${book}|${chapter}|${verse}`;
-          const button = document.createElement('button');
-          button.type = 'button'; button.className = 'native-save-verse'; button.dataset.quoteId = id;
-          button.title = 'Պահել համարը'; button.textContent = '♡';
-          button.onclick = event => { event.stopPropagation(); post({ action: 'save', id, reference: `${book} ${chapter}:${verse}`, text }); };
-          actions.append(button);
+          const verseReference = row.querySelector('.verse-number')?.title.match(/[0-9]+:[0-9]+/)?.[0] || `:${verse}`;
+          const id = `${book}|${verseReference}`;
+          const button = actions.querySelector('.native-save-verse') || document.createElement('button');
+          if (!button.parentElement) {
+            button.type = 'button'; button.className = 'native-save-verse'; button.textContent = '♡';
+            actions.append(button);
+          }
+          button.dataset.quoteId = id;
+          button.dataset.reference = `${book} ${verseReference}`;
+          button.dataset.quoteText = text;
+          button.classList.toggle('saved', savedQuotes.some(quote => quote.id === id));
+          button.title = button.classList.contains('saved') ? 'Պահված է' : 'Պահել համարը';
+          button.onclick = event => { event.stopPropagation(); post({ action: 'save', id: button.dataset.quoteId, reference: button.dataset.reference, text: button.dataset.quoteText }); };
         });
-        const toolbar = document.querySelector('.toolbar-actions');
-        if (toolbar && !toolbar.querySelector('.native-saved-quotes')) {
+        document.querySelectorAll('.toolbar-actions .native-saved-quotes').forEach(button => button.remove());
+        const headerActions = document.querySelector('.header-actions');
+        if (headerActions && !headerActions.querySelector('.native-saved-quotes')) {
           const button = document.createElement('button');
-          button.type = 'button'; button.className = 'native-saved-quotes'; button.title = 'Պահված համարներ'; button.textContent = '♡ Պահված';
-          button.onclick = showPanel; toolbar.append(button);
+          button.type = 'button'; button.className = 'icon-button native-saved-quotes'; button.title = 'Պահված համարներ'; button.setAttribute('aria-label', 'Պահված համարներ'); button.textContent = '♡';
+          button.onclick = showPanel; headerActions.prepend(button);
         }
       };
       const style = document.createElement('style');
-      style.textContent = `.native-save-verse{font:24px -apple-system;color:#a15f50}.native-save-verse.saved{color:#c54343}.native-saved-quotes{margin-left:8px;padding:8px 12px;border:1px solid #b99362;border-radius:10px;background:transparent;color:inherit;font:600 13px -apple-system}#saved-quotes-panel{position:fixed;z-index:9999;inset:10% 7%;display:none;overflow:auto;padding:20px;border:1px solid #b99362;border-radius:16px;background:#1c1b1a;color:#f4f1eb;box-shadow:0 15px 50px #0008}#saved-quotes-panel.visible{display:block}#saved-quotes-panel header{display:flex;justify-content:space-between;align-items:center;font-size:19px}#saved-quotes-panel header button,#saved-quotes-panel article button{border:0;background:transparent;color:inherit;font-size:25px}.saved-quotes-list article{position:relative;margin-top:16px;padding:14px 40px 14px 0;border-top:1px solid #ffffff22}.saved-quotes-list article button{position:absolute;right:0;top:10px;color:#d67b72}.saved-quotes-list article strong{color:#d8b782}.saved-quotes-list article p{margin:8px 0 0;line-height:1.5}.saved-empty{color:#bdb7ad}`;
+      style.textContent = `.native-save-verse{font:24px -apple-system;color:#a15f50}.native-save-verse.saved{color:#c54343}.native-saved-quotes{font:24px -apple-system;color:var(--accent-strong)}#saved-quotes-panel{position:fixed;z-index:9999;inset:10% 7%;display:none;overflow:auto;padding:20px;border:1px solid #b99362;border-radius:16px;background:#1c1b1a;color:#f4f1eb;box-shadow:0 15px 50px #0008}#saved-quotes-panel.visible{display:block}#saved-quotes-panel header{display:flex;justify-content:space-between;align-items:center;font-size:19px}#saved-quotes-panel header button,#saved-quotes-panel article button{border:0;background:transparent;color:inherit;font-size:25px}.saved-quotes-list article{position:relative;margin-top:16px;padding:14px 40px 14px 0;border-top:1px solid #ffffff22}.saved-quotes-list article button{position:absolute;right:0;top:10px;color:#d67b72}.saved-quotes-list article strong{color:#d8b782}.saved-quotes-list article p{margin:8px 0 0;line-height:1.5}.saved-empty{color:#bdb7ad}`;
       document.head.append(style);
       new MutationObserver(addControls).observe(document.documentElement, { childList: true, subtree: true });
       addControls(); post({ action: 'list' });
