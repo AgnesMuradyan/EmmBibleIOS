@@ -240,7 +240,7 @@ private enum SavedQuotesScript {
         const list = document.querySelector('#saved-quotes-panel .saved-quotes-list');
         if (!list) return;
         list.innerHTML = savedQuotes.length
-          ? savedQuotes.map(quote => `<article><button type="button" data-remove-quote="${escape(quote.id)}" aria-label="Ջնջել">×</button><p>${escape(quote.text)}</p></article>`).join('')
+          ? savedQuotes.map(quote => `<article><button type="button" data-remove-quote="${escape(quote.id)}" aria-label="Ջնջել">×</button><strong>${escape(quote.reference)}</strong><p>${escape(quote.text)}</p></article>`).join('')
           : '<p class="saved-empty">Դեռ պահված համարներ չկան։</p>';
       };
       window.__emmBibleSavedQuotes = quotes => {
@@ -257,7 +257,10 @@ private enum SavedQuotesScript {
           if (!actions) return;
           const book = document.querySelector('.chapter-header h1')?.textContent.trim() || '';
           const verse = row.dataset.verse || '';
-          const text = row.querySelector('.verse-body')?.textContent.trim() || '';
+          const verseBody = row.querySelector('.verse-body');
+          const cleanBody = verseBody?.cloneNode(true);
+          cleanBody?.querySelectorAll('.xref').forEach(reference => reference.remove());
+          const text = cleanBody?.textContent.trim() || '';
           const verseReference = row.querySelector('.verse-number')?.title.match(/[0-9]+:[0-9]+/)?.[0] || `:${verse}`;
           const id = `${book}|${verseReference}`;
           const button = actions.querySelector('.native-save-verse') || document.createElement('button');
@@ -287,7 +290,7 @@ private enum SavedQuotesScript {
         }
       };
       const style = document.createElement('style');
-      style.textContent = `.native-save-verse{font:24px -apple-system;color:#a15f50}.native-save-verse.saved{color:#c54343}.native-saved-quotes{font:24px -apple-system;color:var(--accent-strong)}#saved-quotes-panel{position:fixed;z-index:9999;inset:10% 7%;display:none;overflow:auto;padding:20px;border:1px solid #b99362;border-radius:16px;background:#1c1a1a;color:#f4f1eb;box-shadow:0 15px 50px #0008}#saved-quotes-panel.visible{display:block}#saved-quotes-panel header{display:flex;justify-content:space-between;align-items:center;font-size:19px}#saved-quotes-panel header button,#saved-quotes-panel article button{border:0;background:transparent;color:inherit;font-size:25px}.saved-quotes-list article{position:relative;margin-top:16px;padding:14px 40px 14px 0;border-top:1px solid #ffffff22}.saved-quotes-list article button{position:absolute;right:0;top:10px;color:#d67b72}.saved-quotes-list article p{margin:0;line-height:1.5}.saved-empty{color:#bdb7ad}`;
+      style.textContent = `.native-save-verse{font:24px -apple-system;color:#a15f50}.native-save-verse.saved{color:#c54343}.native-saved-quotes{font:24px -apple-system;color:var(--accent-strong)}#saved-quotes-panel{position:fixed;z-index:9999;inset:10% 7%;display:none;overflow:auto;padding:20px;border:1px solid #b99362;border-radius:16px;background:#1c1a1a;color:#f4f1eb;box-shadow:0 15px 50px #0008}#saved-quotes-panel.visible{display:block}#saved-quotes-panel header{display:flex;justify-content:space-between;align-items:center;font-size:19px}#saved-quotes-panel header button,#saved-quotes-panel article button{border:0;background:transparent;color:inherit;font-size:25px}.saved-quotes-list article{position:relative;margin-top:16px;padding:14px 40px 14px 0;border-top:1px solid #ffffff22}.saved-quotes-list article button{position:absolute;right:0;top:10px;color:#d67b72}.saved-quotes-list article strong{display:block;margin-bottom:8px;color:#d8b782}.saved-quotes-list article p{margin:0;line-height:1.5}.saved-empty{color:#bdb7ad}`;
       document.head.append(style);
       new MutationObserver(addControls).observe(document.documentElement, { childList: true, subtree: true });
       addControls(); post({ action: 'list' });
