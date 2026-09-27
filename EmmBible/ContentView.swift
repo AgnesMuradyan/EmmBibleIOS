@@ -311,7 +311,7 @@ private enum SavedQuotesScript {
         if (!list) return;
         list.innerHTML = savedQuotes.length
           ? savedQuotes.map(quote => `<article><button type="button" data-remove-quote="${escape(quote.id)}" aria-label="Ջնջել">×</button><strong>${escape(quote.reference)}</strong><p>${escape(quote.text)}</p></article>`).join('')
-          : '<p class="saved-empty">Դեռ պահված համարներ չկան։</p>';
+          : '<p class="saved-empty">Պահված համարներ չկան։</p>';
       };
       window.__emmBibleSavedQuotes = quotes => {
         savedQuotes.splice(0, savedQuotes.length, ...quotes);
