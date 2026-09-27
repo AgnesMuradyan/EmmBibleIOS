@@ -18,6 +18,7 @@ private struct BibleWebView: UIViewRepresentable {
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "nativeShare")
         controller.add(context.coordinator, name: "savedQuotes")
+        controller.add(context.coordinator, name: "highlights")
 
         let bridge = WKUserScript(
             source: """
@@ -61,6 +62,7 @@ private struct BibleWebView: UIViewRepresentable {
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "nativeShare")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "savedQuotes")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "highlights")
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
@@ -103,6 +105,11 @@ private struct BibleWebView: UIViewRepresentable {
 
             if message.name == "savedQuotes" {
                 handleSavedQuotes(payload, in: message.webView)
+                return
+            }
+
+            if message.name == "highlights" {
+                handleHighlights(payload, in: message.webView)
                 return
             }
 
@@ -163,6 +170,34 @@ private struct BibleWebView: UIViewRepresentable {
             }
         }
 
+        private func handleHighlights(_ payload: [String: Any], in webView: WKWebView?) {
+            switch payload["action"] as? String {
+            case "save":
+                guard let highlight = SavedHighlight(payload: payload) else { return }
+                var highlights = SavedHighlightStore.load()
+                if !highlights.contains(where: { $0.id == highlight.id }) {
+                    highlights.append(highlight)
+                    SavedHighlightStore.save(highlights)
+                }
+                sendHighlights(highlights, to: webView)
+            case "delete":
+                guard let id = payload["id"] as? String else { return }
+                let highlights = SavedHighlightStore.load().filter { $0.id != id }
+                SavedHighlightStore.save(highlights)
+                sendHighlights(highlights, to: webView)
+            default:
+                sendHighlights(SavedHighlightStore.load(), to: webView)
+            }
+        }
+
+        private func sendHighlights(_ highlights: [SavedHighlight], to webView: WKWebView?) {
+            guard let data = try? JSONEncoder().encode(highlights),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                webView?.evaluateJavaScript("window.__emmBibleHighlights(\(json));")
+            }
+        }
+
         private static func topViewController() -> UIViewController? {
             let scene = UIApplication.shared.connectedScenes
                 .compactMap { $0 as? UIWindowScene }
@@ -213,11 +248,46 @@ private enum SavedQuoteStore {
     }
 }
 
+private struct SavedHighlight: Codable {
+    let id: String
+    let verseID: String
+    let text: String
+    let color: String
+
+    init?(payload: [String: Any]) {
+        guard let verseID = payload["verseID"] as? String,
+              let text = payload["text"] as? String,
+              let color = payload["color"] as? String,
+              !verseID.isEmpty, !text.isEmpty else { return nil }
+        self.verseID = verseID
+        self.text = text
+        self.color = color
+        id = "\(verseID)|\(text)|\(color)"
+    }
+}
+
+private enum SavedHighlightStore {
+    private static let key = "savedHighlights"
+
+    static func load() -> [SavedHighlight] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let highlights = try? JSONDecoder().decode([SavedHighlight].self, from: data) else { return [] }
+        return highlights
+    }
+
+    static func save(_ highlights: [SavedHighlight]) {
+        UserDefaults.standard.set(try? JSONEncoder().encode(highlights), forKey: key)
+    }
+}
+
 private enum SavedQuotesScript {
     static let source = """
     (() => {
       let savedQuotes = [];
+      let highlights = [];
+      const highlightRendering = { active: false };
       const post = (message) => window.webkit.messageHandlers.savedQuotes.postMessage(message);
+      const postHighlight = (message) => window.webkit.messageHandlers.highlights.postMessage(message);
       const escape = (value) => value.replace(/[&<>\"]/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;','\\"':'&quot;'}[character]));
       const showPanel = () => {
         let panel = document.querySelector('#saved-quotes-panel');
@@ -251,6 +321,74 @@ private enum SavedQuotesScript {
           button.title = button.classList.contains('saved') ? 'Պահված է' : 'Պահել համարը';
         });
       };
+      const textNodes = element => {
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
+          acceptNode: node => node.parentElement?.closest('.xref, .native-highlight') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
+        });
+        const nodes = []; let node;
+        while (node = walker.nextNode()) nodes.push(node);
+        return nodes;
+      };
+      const unwrapHighlights = element => element.querySelectorAll('.native-highlight').forEach(mark => mark.replaceWith(...mark.childNodes));
+      const applyHighlight = (body, highlight) => {
+        const nodes = textNodes(body), fullText = nodes.map(node => node.textContent).join('');
+        const start = fullText.indexOf(highlight.text), end = start + highlight.text.length;
+        if (start < 0) return;
+        let position = 0, startNode, endNode, startOffset, endOffset;
+        for (const node of nodes) {
+          const next = position + node.textContent.length;
+          if (!startNode && start >= position && start <= next) { startNode = node; startOffset = start - position; }
+          if (end >= position && end <= next) { endNode = node; endOffset = end - position; break; }
+          position = next;
+        }
+        if (!startNode || !endNode) return;
+        const range = document.createRange();
+        range.setStart(startNode, startOffset); range.setEnd(endNode, endOffset);
+        const mark = document.createElement('mark'); mark.className = `native-highlight ${highlight.color}`;
+        try { range.surroundContents(mark); } catch {}
+      };
+      const applyHighlights = () => {
+        highlightRendering.active = true;
+        document.querySelectorAll('.verse-row').forEach(row => {
+          const body = row.querySelector('.verse-body');
+          const verseID = row.querySelector('.native-save-verse')?.dataset.quoteId;
+          if (!body || !verseID) return;
+          unwrapHighlights(body);
+          highlights.filter(highlight => highlight.verseID === verseID).forEach(highlight => applyHighlight(body, highlight));
+        });
+        requestAnimationFrame(() => { highlightRendering.active = false; });
+      };
+      window.__emmBibleHighlights = values => { highlights.splice(0, highlights.length, ...values); applyHighlights(); };
+      const picker = () => {
+        let element = document.querySelector('#highlight-picker');
+        if (element) return element;
+        element = document.createElement('div'); element.id = 'highlight-picker';
+        element.innerHTML = '<button data-color="yellow" aria-label="Դեղին"></button><button data-color="green" aria-label="Կանաչ"></button><button data-color="pink" aria-label="Վարդագույն"></button><button data-color="blue" aria-label="Կապույտ"></button>';
+        element.onclick = event => {
+          const button = event.target.closest('[data-color]');
+          if (!button || !element.dataset.verseId || !element.dataset.text) return;
+          postHighlight({ action: 'save', verseID: element.dataset.verseId, text: element.dataset.text, color: button.dataset.color });
+          window.getSelection()?.removeAllRanges(); element.classList.remove('visible');
+        };
+        document.body.append(element); return element;
+      };
+      const showPicker = () => {
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+        const range = selection.getRangeAt(0);
+        const start = range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer : range.startContainer.parentElement;
+        const end = range.endContainer.nodeType === Node.ELEMENT_NODE ? range.endContainer : range.endContainer.parentElement;
+        const body = start?.closest('.verse-body');
+        if (!body || body !== end?.closest('.verse-body') || start.closest('.xref') || end.closest('.xref')) return;
+        const verseID = body.closest('.verse-row')?.querySelector('.native-save-verse')?.dataset.quoteId;
+        const text = selection.toString().replace(/ +/g, ' ').trim();
+        if (!verseID || text.length < 2) return;
+        const rect = range.getBoundingClientRect(), element = picker();
+        element.dataset.verseId = verseID; element.dataset.text = text;
+        element.style.left = `${Math.min(Math.max(rect.left, 12), window.innerWidth - 196)}px`;
+        element.style.top = `${Math.max(rect.top - 54, 8)}px`;
+        element.classList.add('visible');
+      };
       const addControls = () => {
         document.querySelectorAll('.verse-row').forEach(row => {
           const actions = row.querySelector('.verse-actions');
@@ -281,6 +419,7 @@ private enum SavedQuotesScript {
               : { action: 'save', id: button.dataset.quoteId, reference: button.dataset.reference, text: button.dataset.quoteText });
           };
         });
+        applyHighlights();
         document.querySelectorAll('.toolbar-actions .native-saved-quotes').forEach(button => button.remove());
         const headerActions = document.querySelector('.header-actions');
         if (headerActions && !headerActions.querySelector('.native-saved-quotes')) {
@@ -290,10 +429,13 @@ private enum SavedQuotesScript {
         }
       };
       const style = document.createElement('style');
-      style.textContent = `.native-save-verse{font:24px -apple-system;color:#a15f50}.native-save-verse.saved{color:#c54343}.native-saved-quotes{font:24px -apple-system;color:var(--accent-strong)}#saved-quotes-panel{position:fixed;z-index:9999;inset:10% 7%;display:none;overflow:auto;padding:20px;border:1px solid #b99362;border-radius:16px;background:#1c1a1a;color:#f4f1eb;box-shadow:0 15px 50px #0008}#saved-quotes-panel.visible{display:block}#saved-quotes-panel header{display:flex;justify-content:space-between;align-items:center;font-size:19px}#saved-quotes-panel header button,#saved-quotes-panel article button{border:0;background:transparent;color:inherit;font-size:25px}.saved-quotes-list article{position:relative;margin-top:16px;padding:14px 40px 14px 0;border-top:1px solid #ffffff22}.saved-quotes-list article button{position:absolute;right:0;top:10px;color:#d67b72}.saved-quotes-list article strong{display:block;margin-bottom:8px;color:#d8b782}.saved-quotes-list article p{margin:0;line-height:1.5}.saved-empty{color:#bdb7ad}`;
+      style.textContent = `.native-save-verse{font:24px -apple-system;color:#a15f50}.native-save-verse.saved{color:#c54343}.native-saved-quotes{font:24px -apple-system;color:var(--accent-strong)}.native-highlight{padding:0 .04em;border-radius:3px;color:inherit}.native-highlight.yellow{background:#f5d66d99}.native-highlight.green{background:#78c58a99}.native-highlight.pink{background:#e987aa99}.native-highlight.blue{background:#7eb6e899}#highlight-picker{position:fixed;z-index:10000;display:none;gap:8px;padding:8px;border:1px solid #b99362;border-radius:14px;background:#1c1a1a;box-shadow:0 8px 25px #0008}#highlight-picker.visible{display:flex}#highlight-picker button{width:28px;height:28px;border:2px solid #fff8;border-radius:50%}#highlight-picker button[data-color=yellow]{background:#f5d66d}#highlight-picker button[data-color=green]{background:#78c58a}#highlight-picker button[data-color=pink]{background:#e987aa}#highlight-picker button[data-color=blue]{background:#7eb6e8}#saved-quotes-panel{position:fixed;z-index:9999;inset:10% 7%;display:none;overflow:auto;padding:20px;border:1px solid #b99362;border-radius:16px;background:#1c1a1a;color:#f4f1eb;box-shadow:0 15px 50px #0008}#saved-quotes-panel.visible{display:block}#saved-quotes-panel header{display:flex;justify-content:space-between;align-items:center;font-size:19px}#saved-quotes-panel header button,#saved-quotes-panel article button{border:0;background:transparent;color:inherit;font-size:25px}.saved-quotes-list article{position:relative;margin-top:16px;padding:14px 40px 14px 0;border-top:1px solid #ffffff22}.saved-quotes-list article button{position:absolute;right:0;top:10px;color:#d67b72}.saved-quotes-list article strong{display:block;margin-bottom:8px;color:#d8b782}.saved-quotes-list article p{margin:0;line-height:1.5}.saved-empty{color:#bdb7ad}`;
       document.head.append(style);
-      new MutationObserver(addControls).observe(document.documentElement, { childList: true, subtree: true });
+      new MutationObserver(() => { if (!highlightRendering.active) addControls(); }).observe(document.documentElement, { childList: true, subtree: true });
+      document.addEventListener('selectionchange', () => window.setTimeout(showPicker, 120));
+      document.addEventListener('pointerdown', event => { if (!event.target.closest('#highlight-picker')) picker().classList.remove('visible'); });
       addControls(); post({ action: 'list' });
+      postHighlight({ action: 'list' });
     })();
     """
 }
