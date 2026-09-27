@@ -17,6 +17,7 @@ private struct BibleWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "nativeShare")
+        controller.add(context.coordinator, name: "savedQuotes")
 
         let bridge = WKUserScript(
             source: """
@@ -31,6 +32,11 @@ private struct BibleWebView: UIViewRepresentable {
             forMainFrameOnly: true
         )
         controller.addUserScript(bridge)
+        controller.addUserScript(WKUserScript(
+            source: SavedQuotesScript.source,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        ))
 
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = controller
@@ -54,6 +60,7 @@ private struct BibleWebView: UIViewRepresentable {
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "nativeShare")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "savedQuotes")
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
@@ -66,6 +73,8 @@ private struct BibleWebView: UIViewRepresentable {
                   readerLoaded: !!document.querySelector('.reader-card'),
                   textLength: document.querySelector('.reader-card')?.textContent.length || 0,
                   stylesLoaded: [...document.styleSheets].some(sheet => sheet.href?.includes('/assets/')),
+                  saveControls: document.querySelectorAll('.native-save-verse').length,
+                  savedQuotesButton: !!document.querySelector('.native-saved-quotes'),
                   error: document.querySelector('.error-card')?.textContent || null
                 })
                 """) { result, error in
@@ -88,8 +97,14 @@ private struct BibleWebView: UIViewRepresentable {
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
-            guard message.name == "nativeShare",
-                  let payload = message.body as? [String: Any] else { return }
+            guard let payload = message.body as? [String: Any] else { return }
+
+            if message.name == "savedQuotes" {
+                handleSavedQuotes(payload, in: message.webView)
+                return
+            }
+
+            guard message.name == "nativeShare" else { return }
 
             let title = payload["title"] as? String ?? ""
             let text = payload["text"] as? String ?? ""
@@ -115,6 +130,35 @@ private struct BibleWebView: UIViewRepresentable {
             }
         }
 
+        private func handleSavedQuotes(_ payload: [String: Any], in webView: WKWebView?) {
+            let action = payload["action"] as? String
+            switch action {
+            case "save":
+                guard let quote = SavedQuote(payload: payload) else { return }
+                var quotes = SavedQuoteStore.load()
+                if !quotes.contains(where: { $0.id == quote.id }) {
+                    quotes.insert(quote, at: 0)
+                    SavedQuoteStore.save(quotes)
+                }
+                sendSavedQuotes(quotes, to: webView)
+            case "delete":
+                guard let id = payload["id"] as? String else { return }
+                let quotes = SavedQuoteStore.load().filter { $0.id != id }
+                SavedQuoteStore.save(quotes)
+                sendSavedQuotes(quotes, to: webView)
+            default:
+                sendSavedQuotes(SavedQuoteStore.load(), to: webView)
+            }
+        }
+
+        private func sendSavedQuotes(_ quotes: [SavedQuote], to webView: WKWebView?) {
+            guard let data = try? JSONEncoder().encode(quotes),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                webView?.evaluateJavaScript("window.__emmBibleSavedQuotes(\(json));")
+            }
+        }
+
         private static func topViewController() -> UIViewController? {
             let scene = UIApplication.shared.connectedScenes
                 .compactMap { $0 as? UIWindowScene }
@@ -133,6 +177,105 @@ private struct BibleWebView: UIViewRepresentable {
         </body>
         """
     }
+}
+
+private struct SavedQuote: Codable {
+    let id: String
+    let reference: String
+    let text: String
+
+    init?(payload: [String: Any]) {
+        guard let id = payload["id"] as? String,
+              let reference = payload["reference"] as? String,
+              let text = payload["text"] as? String,
+              !id.isEmpty, !reference.isEmpty, !text.isEmpty else { return nil }
+        self.id = id
+        self.reference = reference
+        self.text = text
+    }
+}
+
+private enum SavedQuoteStore {
+    private static let key = "savedQuotes"
+
+    static func load() -> [SavedQuote] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let quotes = try? JSONDecoder().decode([SavedQuote].self, from: data) else { return [] }
+        return quotes
+    }
+
+    static func save(_ quotes: [SavedQuote]) {
+        UserDefaults.standard.set(try? JSONEncoder().encode(quotes), forKey: key)
+    }
+}
+
+private enum SavedQuotesScript {
+    static let source = """
+    (() => {
+      let savedQuotes = [];
+      const post = (message) => window.webkit.messageHandlers.savedQuotes.postMessage(message);
+      const escape = (value) => value.replace(/[&<>\"]/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;','\\"':'&quot;'}[character]));
+      const showPanel = () => {
+        let panel = document.querySelector('#saved-quotes-panel');
+        if (!panel) {
+          panel = document.createElement('section');
+          panel.id = 'saved-quotes-panel';
+          panel.innerHTML = '<header><strong>Պահված համարներ</strong><button type="button" aria-label="Փակել">×</button></header><div class="saved-quotes-list"></div>';
+          panel.querySelector('header button').onclick = () => panel.classList.remove('visible');
+          panel.querySelector('.saved-quotes-list').onclick = event => {
+            const button = event.target.closest('[data-remove-quote]');
+            if (button) post({ action: 'delete', id: button.dataset.removeQuote });
+          };
+          document.body.append(panel);
+        }
+        panel.classList.add('visible');
+        render();
+        post({ action: 'list' });
+      };
+      const render = () => {
+        const list = document.querySelector('#saved-quotes-panel .saved-quotes-list');
+        if (!list) return;
+        list.innerHTML = savedQuotes.length
+          ? savedQuotes.map(quote => `<article><button type="button" data-remove-quote="${escape(quote.id)}" aria-label="Ջնջել">×</button><strong>${escape(quote.reference)}</strong><p>${escape(quote.text)}</p></article>`).join('')
+          : '<p class="saved-empty">Դեռ պահված համարներ չկան։</p>';
+      };
+      window.__emmBibleSavedQuotes = quotes => {
+        savedQuotes.splice(0, savedQuotes.length, ...quotes);
+        render();
+        document.querySelectorAll('.native-save-verse').forEach(button => {
+          button.classList.toggle('saved', savedQuotes.some(quote => quote.id === button.dataset.quoteId));
+          button.title = button.classList.contains('saved') ? 'Պահված է' : 'Պահել համարը';
+        });
+      };
+      const addControls = () => {
+        document.querySelectorAll('.verse-row').forEach(row => {
+          const actions = row.querySelector('.verse-actions');
+          if (!actions || actions.querySelector('.native-save-verse')) return;
+          const chapter = document.querySelector('.chapter-header p')?.textContent.match(/[0-9]+/)?.[0] || '';
+          const book = document.querySelector('.chapter-header h1')?.textContent.trim() || '';
+          const verse = row.dataset.verse || '';
+          const text = row.querySelector('.verse-body')?.textContent.trim() || '';
+          const id = `${book}|${chapter}|${verse}`;
+          const button = document.createElement('button');
+          button.type = 'button'; button.className = 'native-save-verse'; button.dataset.quoteId = id;
+          button.title = 'Պահել համարը'; button.textContent = '♡';
+          button.onclick = event => { event.stopPropagation(); post({ action: 'save', id, reference: `${book} ${chapter}:${verse}`, text }); };
+          actions.append(button);
+        });
+        const toolbar = document.querySelector('.toolbar-actions');
+        if (toolbar && !toolbar.querySelector('.native-saved-quotes')) {
+          const button = document.createElement('button');
+          button.type = 'button'; button.className = 'native-saved-quotes'; button.title = 'Պահված համարներ'; button.textContent = '♡ Պահված';
+          button.onclick = showPanel; toolbar.append(button);
+        }
+      };
+      const style = document.createElement('style');
+      style.textContent = `.native-save-verse{font:24px -apple-system;color:#a15f50}.native-save-verse.saved{color:#c54343}.native-saved-quotes{margin-left:8px;padding:8px 12px;border:1px solid #b99362;border-radius:10px;background:transparent;color:inherit;font:600 13px -apple-system}#saved-quotes-panel{position:fixed;z-index:9999;inset:10% 7%;display:none;overflow:auto;padding:20px;border:1px solid #b99362;border-radius:16px;background:#1c1b1a;color:#f4f1eb;box-shadow:0 15px 50px #0008}#saved-quotes-panel.visible{display:block}#saved-quotes-panel header{display:flex;justify-content:space-between;align-items:center;font-size:19px}#saved-quotes-panel header button,#saved-quotes-panel article button{border:0;background:transparent;color:inherit;font-size:25px}.saved-quotes-list article{position:relative;margin-top:16px;padding:14px 40px 14px 0;border-top:1px solid #ffffff22}.saved-quotes-list article button{position:absolute;right:0;top:10px;color:#d67b72}.saved-quotes-list article strong{color:#d8b782}.saved-quotes-list article p{margin:8px 0 0;line-height:1.5}.saved-empty{color:#bdb7ad}`;
+      document.head.append(style);
+      new MutationObserver(addControls).observe(document.documentElement, { childList: true, subtree: true });
+      addControls(); post({ action: 'list' });
+    })();
+    """
 }
 
 // Serve the offline site through one origin so modules and fetch() can load
